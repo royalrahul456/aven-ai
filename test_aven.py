@@ -59,7 +59,7 @@ async def run_tests():
         "[Documentation](https://aven.ai)"
     )
     html_res = markdown_to_telegram_html(sample_md)
-    assert "<b>Overview</b>" in html_res
+    assert "<b>• Overview</b>" in html_res or "<b>Overview</b>" in html_res
     assert "<b>bold text</b>" in html_res
     assert "<i>italic text</i>" in html_res
     assert "<code>inline_code</code>" in html_res

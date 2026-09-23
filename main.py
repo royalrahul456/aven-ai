@@ -1,5 +1,6 @@
-"""AVEN AI — Production Telegram Bot Entrypoint with Auto-Reconnection & Resilience."""
+"""AVEN AI — Production Telegram Bot Entrypoint with Render HTTP Health Server & Supabase Support."""
 import asyncio
+import os
 import sys
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -7,6 +8,7 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, BotCommandScopeDefault
 from aiogram.exceptions import TelegramNetworkError
+from aiohttp import web
 
 from config import settings
 from database.db import db_manager
@@ -54,36 +56,69 @@ async def setup_bot_commands(bot: Bot) -> None:
         logger.warning(f"Could not set bot commands automatically: {e}")
 
 
+async def health_handler(request: web.Request) -> web.Response:
+    """Health check endpoint for Render Web Service deployment."""
+    db_type = "Supabase PostgreSQL" if db_manager.is_postgres else "SQLite"
+    return web.json_response({
+        "status": "online",
+        "service": "AVEN AI Telegram Platform",
+        "version": settings.BOT_VERSION,
+        "database": db_type,
+        "bot_handle": settings.BOT_USERNAME
+    })
+
+
+async def start_health_server(port: int) -> web.AppRunner:
+    """Starts a minimal asynchronous health check server on the specified port."""
+    app = web.Application()
+    app.router.add_get("/", health_handler)
+    app.router.add_get("/health", health_handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host="0.0.0.0", port=port)
+    await site.start()
+    logger.info(f"🌐 Render Health Check Server listening on http://0.0.0.0:{port}/")
+    return runner
+
+
 async def main() -> None:
-    logger.info("Initializing AVEN AI Bot...")
+    logger.info("Initializing AVEN AI Platform...")
 
     if not settings.TELEGRAM_BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN is not configured! Please configure it in .env")
         print("\n[!] ERROR: TELEGRAM_BOT_TOKEN is missing from .env\n")
         return
 
-    # 1. Initialize SQLite Database
+    # 1. Initialize Database (Supabase PostgreSQL / SQLite)
     await db_manager.initialize()
 
-    # 2. Setup Bot with resilient AIOHTTP Session
+    # 2. Start Health Check Server for Render (if PORT is set or default 8080)
+    port = int(os.getenv("PORT", str(settings.PORT)))
+    runner: web.AppRunner | None = None
+    try:
+        runner = await start_health_server(port)
+    except Exception as e:
+        logger.warning(f"Health server could not bind to port {port}: {e}. Continuing in polling-only mode.")
+
+    # 3. Setup Bot with resilient AIOHTTP Session
     session = AiohttpSession(timeout=60.0)
     bot = Bot(token=settings.TELEGRAM_BOT_TOKEN, session=session)
     dp = Dispatcher(storage=MemoryStorage())
 
-    # 3. Register Middlewares
+    # 4. Register Middlewares
     dp.update.middleware(ErrorHandlerMiddleware())
     dp.message.middleware(ThrottlingMiddleware())
     dp.callback_query.middleware(ThrottlingMiddleware())
     dp.message.middleware(UserSessionMiddleware())
     dp.callback_query.middleware(UserSessionMiddleware())
 
-    # 4. Include Handlers
+    # 5. Include Handlers
     dp.include_router(get_main_router())
 
-    # 5. Register commands
+    # 6. Register commands
     await setup_bot_commands(bot)
 
-    # 6. Start Polling with auto-reconnect resilience
+    # 7. Start Polling with auto-reconnect resilience
     logger.info("⚡ AVEN AI is now online and polling for updates!")
     
     retry_delay = 3
@@ -108,6 +143,9 @@ async def main() -> None:
         finally:
             pass
 
+    if runner:
+        await runner.cleanup()
+    await db_manager.close()
     await bot.session.close()
 
 

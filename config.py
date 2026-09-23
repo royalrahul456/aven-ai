@@ -61,8 +61,14 @@ class Settings(BaseSettings):
     DEFAULT_TEMPERATURE: float = 0.7
     DEFAULT_THEME: str = "aven"
 
-    # Database
+    # Database (Supabase PostgreSQL / SQLite fallback)
+    DATABASE_URL: Optional[str] = None
+    SUPABASE_DB_URL: Optional[str] = None
     DATABASE_PATH: str = "data/aven_ai.db"
+
+    # Render & Server Configuration
+    PORT: int = 8080
+    HOST: str = "0.0.0.0"
 
     # Performance & Security
     RATE_LIMIT_PER_MINUTE: int = 25
