@@ -1,7 +1,8 @@
-"""AVEN AI — Production Telegram Bot Entrypoint with Render HTTP Health Server & Supabase Support."""
+"""AVEN AI — Production Telegram Bot Entrypoint with Render HTTP Health Server, Keep-Awake Pinger & Supabase Support."""
 import asyncio
 import os
 import sys
+import aiohttp
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
@@ -81,6 +82,30 @@ async def start_health_server(port: int) -> web.AppRunner:
     return runner
 
 
+async def keep_awake_pinger() -> None:
+    """Periodically pings the Render public URL to prevent free tier from sleeping (15-min limit)."""
+    target_url = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("PING_URL")
+    if not target_url:
+        logger.info("ℹ️ To enable built-in keep-awake on Render, set RENDER_EXTERNAL_URL in your environment variables.")
+        return
+
+    target_health = target_url.rstrip("/") + "/health"
+    logger.info(f"🔄 Keep-Awake Pinger active for {target_health} (pinging every 10 minutes).")
+
+    # Initial delay before starting pings
+    await asyncio.sleep(60)
+    while True:
+        try:
+            timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(target_health) as resp:
+                    logger.info(f"💓 Keep-awake ping sent to {target_health} (HTTP {resp.status})")
+        except Exception as e:
+            logger.warning(f"Keep-awake ping failed: {e}")
+        # Ping every 10 minutes (600 seconds)
+        await asyncio.sleep(600)
+
+
 async def main() -> None:
     logger.info("Initializing AVEN AI Platform...")
 
@@ -100,25 +125,28 @@ async def main() -> None:
     except Exception as e:
         logger.warning(f"Health server could not bind to port {port}: {e}. Continuing in polling-only mode.")
 
-    # 3. Setup Bot with resilient AIOHTTP Session
+    # 3. Start Keep-Awake Background Task
+    pinger_task = asyncio.create_task(keep_awake_pinger())
+
+    # 4. Setup Bot with resilient AIOHTTP Session
     session = AiohttpSession(timeout=60.0)
     bot = Bot(token=settings.TELEGRAM_BOT_TOKEN, session=session)
     dp = Dispatcher(storage=MemoryStorage())
 
-    # 4. Register Middlewares
+    # 5. Register Middlewares
     dp.update.middleware(ErrorHandlerMiddleware())
     dp.message.middleware(ThrottlingMiddleware())
     dp.callback_query.middleware(ThrottlingMiddleware())
     dp.message.middleware(UserSessionMiddleware())
     dp.callback_query.middleware(UserSessionMiddleware())
 
-    # 5. Include Handlers
+    # 6. Include Handlers
     dp.include_router(get_main_router())
 
-    # 6. Register commands
+    # 7. Register commands
     await setup_bot_commands(bot)
 
-    # 7. Start Polling with auto-reconnect resilience
+    # 8. Start Polling with auto-reconnect resilience
     logger.info("⚡ AVEN AI is now online and polling for updates!")
     
     retry_delay = 3
@@ -143,6 +171,7 @@ async def main() -> None:
         finally:
             pass
 
+    pinger_task.cancel()
     if runner:
         await runner.cleanup()
     await db_manager.close()
